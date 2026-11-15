@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -179,3 +180,60 @@ class LSTMForecaster:
             raise ValueError("LSTM returned non-finite predictions")
         prediction_index = index if index is not None else pd.RangeIndex(len(prediction))
         return pd.Series(prediction, index=prediction_index, name="prediction")
+
+    def save(self, path: str | Path) -> Path:
+        """Save weights, scaler state, and model parameters for local inference."""
+        if (
+            self._model is None
+            or self._feature_scaler is None
+            or self._target_scaler is None
+            or self._sequence_shape is None
+        ):
+            raise RuntimeError("fit must be called before save")
+        try:
+            import joblib
+        except ImportError as exc:
+            raise ImportError("Install the project's lstm dependency group to save LSTM models.") from exc
+
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(
+            {
+                "parameters": self.parameters,
+                "feature_scaler": self._feature_scaler,
+                "target_scaler": self._target_scaler,
+                "sequence_shape": self._sequence_shape,
+                "state_dict": self._model.state_dict(),
+            },
+            output,
+        )
+        return output
+
+    @classmethod
+    def load(cls, path: str | Path) -> LSTMForecaster:
+        """Load a local LSTM inference bundle created by :meth:`save`."""
+        try:
+            import joblib
+            import torch
+        except ImportError as exc:
+            raise ImportError("Install the project's lstm dependency group to load LSTM models.") from exc
+
+        checkpoint = joblib.load(Path(path))
+        required = {"parameters", "feature_scaler", "target_scaler", "sequence_shape", "state_dict"}
+        if not isinstance(checkpoint, dict) or not required.issubset(checkpoint):
+            raise ValueError("LSTM model bundle is missing required state")
+
+        adapter = cls(**checkpoint["parameters"])
+        sequence_shape = tuple(checkpoint["sequence_shape"])
+        if len(sequence_shape) != 2 or any(type(value) is not int or value < 1 for value in sequence_shape):
+            raise ValueError("LSTM model bundle has an invalid sequence shape")
+        model_class = adapter._make_model(torch, input_size=sequence_shape[1])
+        model = model_class()
+        model.load_state_dict(checkpoint["state_dict"])
+        model.eval()
+
+        adapter._model = model
+        adapter._feature_scaler = checkpoint["feature_scaler"]
+        adapter._target_scaler = checkpoint["target_scaler"]
+        adapter._sequence_shape = sequence_shape
+        return adapter

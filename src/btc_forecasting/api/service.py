@@ -13,6 +13,8 @@ import pandas as pd
 
 from ..data import load_ohlcv_csv
 from ..models.arima import forecast_arima
+from ..models.lstm import LSTMForecaster
+from ..models.xgboost_model import XGBoostForecaster
 from .schemas import (
     ForecastPoint,
     ForecastRequest,
@@ -23,8 +25,13 @@ from .schemas import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "bitcoin_data.csv"
+DEFAULT_FEATURES_PATH = PROJECT_ROOT / "data" / "bitcoin_features.csv"
+DEFAULT_RUNS_PATH = PROJECT_ROOT / "artifacts" / "runs"
 ARIMA_ORDER_PATH = PROJECT_ROOT / "arima" / "arima_metrics.json"
 DATA_ENV_VAR = "BTC_FORECASTING_DATA"
+FEATURES_ENV_VAR = "BTC_FORECASTING_FEATURES"
+MODEL_RUN_ENV_VAR = "BTC_FORECASTING_MODEL_RUN"
+_MODEL_CACHE: dict[tuple[str, int], object] = {}
 
 
 class DataUnavailableError(RuntimeError):
@@ -53,6 +60,121 @@ def data_path() -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def features_path() -> Path:
+    """Return the processed feature table used by trained ML models."""
+    configured = os.environ.get(FEATURES_ENV_VAR)
+    if not configured:
+        return DEFAULT_FEATURES_PATH
+    path = Path(configured).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _model_run_path(model_name: str) -> Path | None:
+    configured = os.environ.get(MODEL_RUN_ENV_VAR)
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else PROJECT_ROOT / path
+    if not DEFAULT_RUNS_PATH.is_dir():
+        return None
+    candidates = sorted(
+        (path for path in DEFAULT_RUNS_PATH.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for candidate in candidates:
+        try:
+            metadata = json.loads((candidate / "metadata.json").read_text(encoding="utf-8"))
+            relative_path = metadata["model_artifacts"][model_name]
+            model_path = (candidate / relative_path).resolve()
+            model_path.relative_to(candidate.resolve())
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        if model_path.is_file():
+            return candidate
+    return None
+
+
+def _model_bundle(name: str) -> tuple[Path, dict]:
+    run_path = _model_run_path(name)
+    if run_path is None or not run_path.is_dir():
+        raise ModelUnavailableError(
+            f"No experiment run is available. Run the experiment and set {MODEL_RUN_ENV_VAR} if needed."
+        )
+    try:
+        metadata = json.loads((run_path / "metadata.json").read_text(encoding="utf-8"))
+        relative_path = metadata["model_artifacts"][name]
+        model_path = (run_path / relative_path).resolve()
+        model_path.relative_to(run_path.resolve())
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ModelUnavailableError(
+            f"The selected experiment run has no valid {name} model bundle."
+        ) from exc
+    if not model_path.is_file():
+        raise ModelUnavailableError(f"The saved {name} model bundle is missing: {model_path.name}")
+    return model_path, metadata
+
+
+def _load_feature_history(
+    path: Path,
+    *,
+    feature_columns: list[str],
+    expected_last_date: pd.Timestamp,
+) -> pd.DataFrame:
+    """Load the processed table and enforce its model-input schema and origin."""
+    if not path.is_file():
+        raise DataUnavailableError(
+            f"Processed model features are unavailable at {path}. Set {FEATURES_ENV_VAR}."
+        )
+    try:
+        frame = pd.read_csv(path)
+        if "Date" not in frame.columns:
+            raise ValueError("feature CSV must contain a Date column")
+        dates = pd.to_datetime(frame.pop("Date"), errors="raise", utc=True)
+        frame.index = dates.dt.tz_convert(None).dt.normalize()
+        frame.index.name = "Date"
+    except (OSError, ValueError, KeyError) as exc:
+        raise DataUnavailableError(f"Model feature table could not be loaded: {exc}") from exc
+
+    if frame.empty or frame.index.has_duplicates or not frame.index.is_monotonic_increasing:
+        raise DataUnavailableError("Model feature dates must be non-empty, unique, and chronological.")
+    if not frame.index[-1] == expected_last_date:
+        raise DataUnavailableError(
+            "OHLCV and processed feature data must end on the same date before forecasting."
+        )
+    missing = [column for column in feature_columns if column not in frame.columns]
+    if missing:
+        raise DataUnavailableError(f"Model feature table is missing columns: {', '.join(missing)}")
+
+    try:
+        values = frame.loc[:, feature_columns].apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise DataUnavailableError(f"Model features must be numeric: {exc}") from exc
+    if not np.isfinite(values.to_numpy(dtype=float)).all():
+        raise DataUnavailableError("Latest model features contain missing or non-finite values.")
+    return values
+
+
+def _cached_model(name: str, path: Path, metadata: dict):
+    cache_key = (str(path), path.stat().st_mtime_ns)
+    if cache_key in _MODEL_CACHE:
+        return _MODEL_CACHE[cache_key]
+    try:
+        if name == "xgboost":
+            settings = metadata["model"]["xgboost"]
+            model = XGBoostForecaster.load(
+                path,
+                feature_columns=metadata["feature_columns"],
+                parameters=settings["parameters"],
+            )
+        else:
+            model = LSTMForecaster.load(path)
+    except (ImportError, OSError, KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise ModelUnavailableError(f"The saved {name} model could not be loaded: {exc}") from exc
+    _MODEL_CACHE.clear()
+    _MODEL_CACHE[cache_key] = model
+    return model
+
+
 def list_models() -> list[ModelStatus]:
     """Report implemented models separately from optional runtime readiness."""
     arima_ready = False
@@ -66,6 +188,32 @@ def list_models() -> list[ModelStatus]:
         else:
             arima_ready = True
             arima_detail = "Fits the saved ARIMA order to the available close history."
+
+    ml_status: dict[str, tuple[bool, str]] = {}
+    for name, dependencies in {
+        "xgboost": ("xgboost", "sklearn"),
+        "lstm": ("torch", "joblib", "sklearn"),
+    }.items():
+        missing_dependencies = [
+            dependency
+            for dependency in dependencies
+            if importlib.util.find_spec(dependency) is None
+        ]
+        if missing_dependencies:
+            ml_status[name] = (
+                False,
+                f"Install the project's {name} dependency group to enable serving.",
+            )
+            continue
+        try:
+            _model_bundle(name)
+        except ModelUnavailableError as exc:
+            ml_status[name] = (False, str(exc))
+        else:
+            ml_status[name] = (
+                True,
+                "Loads the selected saved model bundle and serves one-day-ahead forecasts.",
+            )
 
     return [
         ModelStatus(
@@ -82,15 +230,15 @@ def list_models() -> list[ModelStatus]:
         ),
         ModelStatus(
             name="xgboost",
-            implemented=False,
-            ready=False,
-            detail="No trained or serving implementation is available yet.",
+            implemented=True,
+            ready=ml_status["xgboost"][0],
+            detail=ml_status["xgboost"][1],
         ),
         ModelStatus(
             name="lstm",
-            implemented=False,
-            ready=False,
-            detail="No trained or serving implementation is available yet.",
+            implemented=True,
+            ready=ml_status["lstm"][0],
+            detail=ml_status["lstm"][1],
         ),
     ]
 
@@ -158,6 +306,47 @@ def create_forecast(request: ForecastRequest) -> ForecastResponse:
         except (ValueError, RuntimeError, np.linalg.LinAlgError, FloatingPointError) as exc:
             raise ForecastUnavailableError(f"ARIMA forecast failed: {exc}") from exc
         predicted_values = predicted.to_numpy(dtype=float)
+    elif request.model in {"xgboost", "lstm"}:
+        if request.horizon_days != 1:
+            raise ModelUnavailableError(
+                f"{request.model} currently supports one-day-ahead forecasts only; "
+                "multi-day inference needs a defined future-feature strategy."
+            )
+        if request.model == "xgboost" and importlib.util.find_spec("xgboost") is None:
+            raise ModelUnavailableError("Install the project's xgboost dependency group to enable XGBoost.")
+        if request.model == "lstm" and any(
+            importlib.util.find_spec(dependency) is None
+            for dependency in ("torch", "joblib", "sklearn")
+        ):
+            raise ModelUnavailableError("Install the project's lstm dependency group to enable LSTM.")
+
+        model_path, metadata = _model_bundle(request.model)
+        model = _cached_model(request.model, model_path, metadata)
+        feature_columns = metadata.get("feature_columns")
+        if not isinstance(feature_columns, list) or not feature_columns:
+            raise ModelUnavailableError("The saved run does not contain a valid model feature schema.")
+        feature_history = _load_feature_history(
+            features_path(),
+            feature_columns=feature_columns,
+            expected_last_date=history.index[-1],
+        )
+
+        try:
+            if request.model == "xgboost":
+                predicted = model.predict(feature_history.iloc[[-1]])
+                predicted_values = predicted.to_numpy(dtype=float)
+            else:
+                sequence_length = int(metadata["model"]["lstm"]["sequence_length"])
+                if len(feature_history) < sequence_length:
+                    raise ValueError("Feature history is shorter than the saved LSTM sequence length")
+                values = feature_history.tail(sequence_length).to_numpy(dtype=np.float32)[None, :, :]
+                predicted_log_return = float(model.predict(values).iloc[0])
+                predicted_values = np.asarray(
+                    [float(close.iloc[-1]) * np.exp(predicted_log_return)],
+                    dtype=float,
+                )
+        except (ValueError, RuntimeError, KeyError, OverflowError, FloatingPointError) as exc:
+            raise ForecastUnavailableError(f"{request.model} forecast failed: {exc}") from exc
     else:
         raise ModelUnavailableError(f"The {request.model} model is not implemented for serving yet.")
 

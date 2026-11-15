@@ -133,14 +133,21 @@ def _build_lstm_sequences(
     feature_values = frame[feature_columns].to_numpy(dtype=np.float32)
     close = pd.to_numeric(frame["Close"], errors="raise").to_numpy(dtype=float)
     next_close = pd.to_numeric(frame[target_column], errors="raise").to_numpy(dtype=float)
-    if (close <= 0).any() or (next_close <= 0).any():
+    if (close <= 0).any():
         raise ValueError("LSTM log-return targets require positive close prices")
+    valid_positions = np.flatnonzero(
+        np.isfinite(next_close) & (np.arange(len(frame)) >= lookback - 1)
+    )
+    if not len(valid_positions):
+        raise ValueError("No complete LSTM target sequences are available")
+    if (next_close[valid_positions] <= 0).any():
+        raise ValueError("LSTM log-return targets require positive next-close prices")
 
     sequences = np.stack(
-        [feature_values[end - lookback + 1 : end + 1] for end in range(lookback - 1, len(frame))]
+        [feature_values[end - lookback + 1 : end + 1] for end in valid_positions]
     )
-    index = frame.index[lookback - 1 :]
-    log_return = np.log(next_close[lookback - 1 :] / close[lookback - 1 :])
+    index = frame.index[valid_positions]
+    log_return = np.log(next_close[valid_positions] / close[valid_positions])
     target = pd.Series(log_return, index=index, name="Target_Log_Return")
     return sequences, index, target
 
@@ -377,6 +384,25 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
         },
     )
 
+    # Fit separate deployment bundles only after the held-out metrics have been
+    # computed. These bundles may learn from all labeled rows; they are not the
+    # models that produced the 2025 evaluation predictions above.
+    labeled_frame = frame.loc[frame[target_column].notna()]
+    if labeled_frame.empty:
+        raise ValueError("No labeled rows are available to fit deployment models")
+    deployment_xgboost = XGBoostForecaster(
+        n_estimators=best_estimators,
+        **common_params,
+    ).fit(labeled_frame[feature_columns], labeled_frame[target_column])
+    deployment_sequence_positions = sequence_positions.to_numpy()
+    deployment_lstm = LSTMForecaster(
+        epochs=best_epochs,
+        **lstm_common_parameters,
+    ).fit(
+        lstm_sequences[deployment_sequence_positions],
+        lstm_targets,
+    )
+
     predictions = pd.DataFrame(
         {
             "actual_next_close_usd": test[target_column],
@@ -441,6 +467,15 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
                 "parameters": {**lstm_common_parameters, "epochs": best_epochs},
             },
         },
+        "deployment_models": {
+            "fit_after_test_evaluation": True,
+            "target_date_range": {
+                "first": labeled_frame["Target_Date"].min(),
+                "last": labeled_frame["Target_Date"].max(),
+            },
+            "xgboost": "refit with validation-selected settings on all available labeled rows",
+            "lstm": "refit with validation-selected settings and training-only scalers on all available labeled sequences",
+        },
         "software_versions": {
             "python": platform.python_version(),
             "numpy": _package_version("numpy"),
@@ -459,6 +494,7 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
         metrics=metrics,
         metadata=metadata,
         validation_scores=validation_scores,
+        models={"xgboost": deployment_xgboost, "lstm": deployment_lstm},
     )
 
 

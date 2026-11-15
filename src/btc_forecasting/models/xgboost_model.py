@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -115,3 +117,37 @@ class XGBoostForecaster:
         if len(values) != len(ordered) or not np.isfinite(values).all():
             raise ValueError("XGBoost returned invalid predictions")
         return pd.Series(values, index=ordered.index, name="prediction")
+
+    def save(self, path: str | Path) -> Path:
+        """Save the fitted XGBoost booster in its native JSON format."""
+        if self._model is None:
+            raise RuntimeError("fit must be called before save")
+        output = Path(path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        self._model.save_model(output)
+        return output
+
+    @classmethod
+    def load(
+        cls,
+        path: str | Path,
+        *,
+        feature_columns: tuple[str, ...] | list[str],
+        parameters: dict[str, int | float],
+    ) -> XGBoostForecaster:
+        """Load a saved booster with the feature contract recorded for its run."""
+        from xgboost import XGBRegressor
+
+        adapter = cls(**parameters)
+        model = XGBRegressor(
+            objective="reg:squarederror",
+            eval_metric="rmse",
+            n_jobs=-1,
+            **parameters,
+        )
+        model.load_model(Path(path))
+        if not feature_columns or len(set(feature_columns)) != len(feature_columns):
+            raise ValueError("feature_columns must be a non-empty list of unique names")
+        adapter._model = model
+        adapter._feature_columns = tuple(feature_columns)
+        return adapter

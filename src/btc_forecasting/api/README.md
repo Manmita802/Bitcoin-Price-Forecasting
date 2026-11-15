@@ -7,7 +7,7 @@ This is a local development API for the BTC-USD project. It serves forecasts fro
 Use a Python version allowed by the project (`>=3.11,<3.13`). From the repository root:
 
 ```powershell
-python -m pip install -e ".[api,arima]"
+python -m pip install -e ".[api,arima,xgboost,lstm]"
 python -m uvicorn btc_forecasting.api.main:app --reload --app-dir src
 ```
 
@@ -30,6 +30,10 @@ Example request:
 }
 ```
 
-`persistence` repeats the latest observed close and serves as a baseline. `arima` fits the order recorded in `arima/arima_metrics.json` to the local close history. Both use the last date in the CSV as the forecast origin. The API marks XGBoost and LSTM unavailable until their serving implementations exist; it does not return fabricated values for them.
+`persistence` repeats the latest observed close and serves as a baseline. `arima` fits the order recorded in `arima/arima_metrics.json` to the local close history. Both use the last date in the CSV as the forecast origin.
 
-This API is a development foundation. It has no authentication, rate limiting, CORS policy, live data refresh, trained XGBoost/LSTM artifacts, or deployment configuration. Set those policies when the consuming application and hosting environment are defined.
+XGBoost and LSTM require saved model bundles from a completed experiment run. The API selects the latest directory under `artifacts/runs/` by default. Set `BTC_FORECASTING_MODEL_RUN` to a specific run directory when needed. The processed feature CSV defaults to `data/bitcoin_features.csv`; set `BTC_FORECASTING_FEATURES` to override it. The OHLCV and feature CSVs must end on the same date. These models currently serve one-day-ahead forecasts only because longer horizons need a defined future-feature strategy. The API returns a clear unavailable response when the bundle, dependency, or matching feature data is missing.
+
+Create model bundles by running `python scripts/run_experiment.py`. Test metrics are computed before separate deployment bundles are fit on all labeled rows; those bundles are intended for inference and must not be used to reproduce the held-out 2025 metrics.
+
+This API is a local development service. It has no authentication, rate limiting, CORS policy, live data refresh, or deployment configuration. Set those policies when the consuming application and hosting environment are defined.

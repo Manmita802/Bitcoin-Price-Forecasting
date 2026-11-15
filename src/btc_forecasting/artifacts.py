@@ -30,6 +30,7 @@ def save_experiment_artifacts(
     metrics: pd.DataFrame,
     metadata: Mapping[str, Any],
     validation_scores: pd.DataFrame | None = None,
+    models: Mapping[str, Any] | None = None,
 ) -> Path:
     """Write one complete run to a new, timestamped directory.
 
@@ -51,6 +52,14 @@ def save_experiment_artifacts(
         not isinstance(validation_scores, pd.DataFrame) or validation_scores.empty
     ):
         raise ValueError("validation_scores must be a non-empty DataFrame when provided")
+    if models is not None:
+        unsupported = set(models) - {"xgboost", "lstm"}
+        if unsupported:
+            raise ValueError(f"Unsupported model artifact(s): {', '.join(sorted(unsupported))}")
+        if not models:
+            raise ValueError("models must be omitted or contain at least one fitted model")
+        if any(not callable(getattr(model, "save", None)) for model in models.values()):
+            raise TypeError("Every model artifact must expose a save(path) method")
 
     root = Path(output_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -61,6 +70,11 @@ def save_experiment_artifacts(
         "run_id": run_id,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    model_filenames = {"xgboost": "xgboost.json", "lstm": "lstm.joblib"}
+    if models is not None:
+        run_metadata["model_artifacts"] = {
+            name: f"models/{model_filenames[name]}" for name in sorted(models)
+        }
 
     with tempfile.TemporaryDirectory(prefix=f".{run_id}-", dir=root) as temporary:
         temporary_path = Path(temporary)
@@ -76,6 +90,11 @@ def save_experiment_artifacts(
             validation_scores.to_csv(
                 staging_path / "validation_scores.csv", index_label="candidate"
             )
+        if models is not None:
+            model_directory = staging_path / "models"
+            model_directory.mkdir()
+            for name, model in models.items():
+                model.save(model_directory / model_filenames[name])
         (staging_path / "metadata.json").write_text(
             json.dumps(
                 run_metadata,

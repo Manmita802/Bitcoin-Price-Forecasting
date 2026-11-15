@@ -9,7 +9,7 @@ This repository contains a reproducible daily Bitcoin close forecasting backend.
 - Selects ARIMA order on training data only, and selects XGBoost estimator count and LSTM epoch count on 2024 validation data.
 - Fits learned preprocessing on training data during model selection, then refits the selected model on train plus validation before final test inference.
 - Saves per-date predictions, test metrics, validation candidate scores, configuration, input hash, and package versions in a unique run directory.
-- Provides a local FastAPI backend for readiness, model status, persistence, and ARIMA forecasts.
+- Provides a local FastAPI backend for readiness, model status, persistence, ARIMA, and one-day XGBoost/LSTM forecasts when saved bundles are available.
 
 ## Environment and experiment
 
@@ -33,15 +33,15 @@ Run artifacts are saved under `artifacts/runs/` and excluded from Git. The data 
 Install the API dependencies and start FastAPI from the repository root:
 
 ```powershell
-.\.venv\Scripts\python -m pip install -e ".[api,arima]"
+.\.venv\Scripts\python -m pip install -e ".[api,arima,xgboost,lstm]"
 .\.venv\Scripts\python -m uvicorn btc_forecasting.api.main:app --reload --app-dir src
 ```
 
-Open `http://127.0.0.1:8000/docs` for the interactive API description. The API currently serves persistence and ARIMA forecasts from the configured local OHLCV CSV; it does not yet load trained XGBoost or LSTM artifacts.
+Open `http://127.0.0.1:8000/docs` for the interactive API description. Run the experiment to create deployable XGBoost and LSTM bundles. The API loads the latest run from `artifacts/runs/`; set `BTC_FORECASTING_MODEL_RUN` to select a particular run. The feature table path defaults to `data/bitcoin_features.csv` and can be changed with `BTC_FORECASTING_FEATURES`. For ML forecasts, the feature table and OHLCV history must end on the same date. XGBoost and LSTM currently support one-day-ahead forecasts only.
 
 ## Project limitations and next work
 
-- XGBoost and LSTM run artifacts currently contain predictions and metadata, not deployable model bundles.
+- The API does not support multi-day recursive XGBoost/LSTM inference because future OHLCV features are unknown.
 - The API uses the historical ARIMA order file and has no authenticated access, rate limiting, or live data refresh.
 - The checked-in feature CSVs duplicate processed data; preserving raw OHLCV and defining one canonical processed output remain follow-up tasks.
 - Add model artifact versioning and serving after reviewing the saved experiment results. Then build the frontend and deployment workflow.
