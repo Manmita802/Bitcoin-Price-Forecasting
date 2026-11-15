@@ -1,35 +1,18 @@
-# Experiment scripts
+# Experiment runner
 
-## ARIMA and XGBoost versus persistence
-
-Use Python `>=3.11,<3.13`, as declared in `pyproject.toml`. From the repository
-root, install the optional ARIMA and XGBoost dependencies and run:
+Use Python `>=3.11,<3.13`, preferably Python 3.12. From the repository root:
 
 ```powershell
-python -m pip install -e ".[arima,xgboost]"
+python -m pip install -e ".[arima,xgboost,lstm]"
 python scripts/run_experiment.py
 ```
 
-The runner reads `data/bitcoin_features.csv` by default. Use `--data` to supply
-another feature CSV, `--config` to select a YAML configuration, or
-`--output-root` to change where run artifacts are stored. Relative paths are
-resolved from the repository root.
+The default input is `data/bitcoin_features.csv`; settings are read from `configs/default.yaml`. Use `--data`, `--config`, or `--output-root` to override them. Relative paths are resolved from the repository root.
 
-The validation period selects the number of boosting rounds using the
-configured MAE or RMSE metric. ARIMA order is selected by AIC using training
-closes only. Both models are evaluated on the same held-out target dates against
-the persistence baseline. The feature row at date *t* predicts the target close
-at *t+1*; partitioning uses the target date so a boundary label cannot cross
-into the next split. Predictions remain indexed by their decision date. XGBoost
-is refit on the training and validation target dates; ARIMA is fit through the
-last validation close. During test, parameters stay fixed and ARIMA appends
-each newly observed close after forecasting it.
+The runner partitions rows by **target date**: train through 2023-12-31, use 2024 for setting selection, and reserve 2025 for final evaluation. All forecasts predict the next close after the current daily candle closes and are scored on the same target dates against persistence.
 
-Each run writes a new directory under `artifacts/runs/` containing predictions,
-test metrics, validation candidate scores, the effective configuration, the
-input CSV SHA-256, and software versions. The generated artifacts are ignored
-by Git.
+- ARIMA order is selected by AIC using training-period closes only. It uses rolling one-step forecasts and appends each observed close without refitting parameters.
+- XGBoost estimator count is selected on validation. The selected model is refit on train plus validation before test prediction.
+- LSTM epoch count is selected on validation. It uses causal 30-row sequences, predicts log return, and fits feature and target scalers only on its training rows during selection. The selected model is then refit on train plus validation.
 
-This runner compares ARIMA and XGBoost with the persistence baseline. LSTM will
-be added after its sequence and training-only scaling behavior follows the same
-split and prediction contract.
+Each output directory contains test predictions, shared test metrics, candidate validation scores, effective configuration, input SHA-256, and software versions. Set `--output-root` to choose an artifact location. The default `artifacts/runs/` output is excluded from Git.

@@ -10,8 +10,9 @@ Build a reproducible daily BTC-USD next-close forecasting pipeline for ARIMA, XG
 - `models/arima.py` provides a fixed-order ARIMA forecast adapter. The API reads its order from the existing `arima/arima_metrics.json` file and fits it to the configured close-price history for each request.
 - `models/xgboost_model.py` provides a fit/predict adapter with target-column and feature-schema checks; the experiment runner uses it, but the API does not serve saved XGBoost models yet.
 - `evaluation.py` compares named prediction series with shared metrics and requires identical chronological dates. Generic rolling-origin orchestration is not implemented; the current script handles the ARIMA rolling state explicitly.
-- `scripts/run_experiment.py` runs an initial ARIMA/XGBoost/persistence comparison. It selects XGBoost rounds on validation data, selects ARIMA order by training-period AIC, and evaluates both models on target-date-aligned test rows.
-- `artifacts.py` writes predictions, metrics, validation scores, and run metadata to a new run directory. `models/lstm.py` remains unimplemented, and the XGBoost and LSTM notebooks remain empty.
+- `models/lstm.py` provides a sequence regressor with scalers fit only on the supplied training sequences. The experiment runner predicts log returns and converts them back to close prices.
+- `scripts/run_experiment.py` compares persistence, ARIMA, XGBoost, and LSTM. It selects ARIMA order using training-period AIC, selects XGBoost estimators and LSTM epochs using 2024 validation data, then evaluates all four on the same 2025 target-date test rows.
+- `artifacts.py` writes predictions, metrics, validation scores, and run metadata to a new run directory. Model bundles are not saved yet, so these artifacts are for evaluation rather than API inference.
 
 ## Target layout
 
@@ -82,8 +83,8 @@ Do not move the existing files as part of this architecture decision. Later migr
 | `src/btc_forecasting/evaluation.py` | Shared metric comparison on exactly aligned prediction dates | Extend with rolling-origin orchestration and prediction records |
 | `src/btc_forecasting/models/xgboost_model.py` | Fit/predict adapter with target-column and feature-schema checks | Integrate with chronological tuning, shared evaluation, and artifact persistence |
 | `src/btc_forecasting/models/arima.py` | Fixed-order forecast with prediction intervals | Reproduce notebook evaluation using the shared protocol |
-| `src/btc_forecasting/models/lstm.py` | Documentation-only stub | Implement after sequence and training-only scaling contracts are defined |
-| `scripts/run_experiment.py` | Initial ARIMA/XGBoost/persistence comparison with validation selection and test artifacts | Extend to additional model adapters and richer experiment reporting |
+| `src/btc_forecasting/models/lstm.py` | Sequence LSTM with training-only feature and target scaling | Keep the sequence builder and inference contract shared with the experiment runner |
+| `scripts/run_experiment.py` | ARIMA/XGBoost/LSTM/persistence comparison with validation selection and test artifacts | Add saved model bundles after reviewing results and defining inference compatibility |
 | `src/btc_forecasting/artifacts.py` | Writes predictions, scores, and run metadata to unique run directories | Extend as the experiment contract stabilizes |
 | `xgboost/xgboost.ipynb` | Empty (0 bytes) | Optional analysis notebook; model implementation belongs in `models/xgboost.py` |
 | `lstm/lstm.ipynb` | Empty (0 bytes) | Optional analysis notebook; model implementation belongs in `models/lstm.py` |
@@ -95,13 +96,13 @@ Do not move the existing files as part of this architecture decision. Later migr
 
 ## Missing pieces before model comparison
 
-The package, dependency bounds, and default experiment configuration exist. Data validation, feature engineering, chronological date splits, shared metrics, persistence/ARIMA API serving, XGBoost and rolling ARIMA adapters, aligned-date comparison, an initial ARIMA/XGBoost experiment runner, and run artifact persistence are implemented. LSTM, automated checks, model artifact loading for API serving, and broader experiment reporting are still missing.
+The package, dependency bounds, and default experiment configuration exist. Data validation, feature engineering, target-date chronological splits, shared metrics, persistence/ARIMA API serving, XGBoost and rolling ARIMA adapters, sequence-based LSTM, aligned-date model comparison, and run artifact persistence are implemented. Deployable model bundles, XGBoost/LSTM API inference, automated checks, and a canonical raw-to-processed data command remain.
 
 1. Install the declared dependencies in a compatible Python 3.12 environment and record a resolved lockfile.
 2. Preserve a raw OHLCV snapshot and define one canonical processed-data output.
 3. Add automated checks for data validation, feature generation, split boundaries, target leakage, and rolling ARIMA updates.
-4. Review and run the initial ARIMA/XGBoost experiment in a compatible environment; verify its saved prediction records and metrics.
-5. Implement the LSTM adapter with sequence construction and training-only scaling, then evaluate it under the same protocol.
+4. Run and review the four-way ARIMA/XGBoost/LSTM/persistence experiment in a compatible environment; check predictions and metrics before relying on scores.
+5. Define versioned, reproducible model bundles and add XGBoost/LSTM single-step inference to the API.
 ## Evaluation contract
 
 The current proposed comparison is a one-day-ahead next-close forecast made after the daily candle closes. Train through 2023-12-31, select settings using 2024, and reserve 2025 for final testing. At test time use rolling one-step predictions with fixed learned parameters; update ARIMA's state only as actual closes become available. Compare all models on the same dates against the persistence baseline (`next close = current close`). Report MAE, RMSE, and direction accuracy using each forecast versus the prior observed close. Confirm split boundaries and available dates against the raw source before execution.
@@ -111,10 +112,9 @@ The current proposed comparison is a one-day-ahead next-close forecast made afte
 1. Install dependencies into a Python 3.12 environment and lock the resolved versions.
 2. Implement data validation, raw/processed paths, and feature generation; compare new outputs with the legacy CSVs before changing the existing workflow.
 3. Add automated checks for split boundaries, target leakage, and equal model evaluation windows.
-4. Review and validate the current ARIMA/XGBoost comparison in a compatible environment.
-5. Implement and evaluate LSTM with sequence construction and training-only scaling.
-6. Add saved-model loading to the API after defining model artifact versioning and compatibility.
-7. Consider UI and deployment after clean-environment reproducibility is established.
+4. Run and review the current ARIMA/XGBoost/LSTM comparison in a compatible environment.
+5. Add model bundle versioning, loading, and API inference for trained models.
+6. Consider UI and deployment after clean-environment reproducibility is established.
 
 Each step should be reviewed before retiring or moving its corresponding existing work.
 

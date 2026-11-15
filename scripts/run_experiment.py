@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -282,12 +283,13 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
     test_sequence_index = test.index.intersection(sequence_index, sort=False)
     if not len(train_sequence_index) or not len(validation_sequence_index) or not len(test_sequence_index):
         raise ValueError("LSTM sequence construction left an empty date partition")
+    if not test_sequence_index.equals(test.index):
+        raise ValueError("LSTM sequence dates do not cover the complete shared test window")
     train_sequence_positions = sequence_positions.loc[train_sequence_index].to_numpy()
     validation_sequence_positions = sequence_positions.loc[validation_sequence_index].to_numpy()
     test_sequence_positions = sequence_positions.loc[test_sequence_index].to_numpy()
     train_log_returns = lstm_targets.loc[train_sequence_index]
     validation_log_returns = lstm_targets.loc[validation_sequence_index]
-    test_log_returns = lstm_targets.loc[test_sequence_index]
 
     lstm_common_parameters = {
         key: lstm_config[key]
@@ -371,6 +373,7 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
             "persistence": baseline_prediction,
             "arima": arima_test_prediction,
             "xgboost": xgb_prediction,
+            "lstm": lstm_test_prediction,
         },
     )
 
@@ -381,11 +384,12 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
             "persistence_prediction_usd": baseline_prediction,
             "arima_prediction_usd": arima_test_prediction,
             "xgboost_prediction_usd": xgb_prediction,
+            "lstm_prediction_usd": lstm_test_prediction,
         },
         index=test.index,
     )
     predictions.index.name = "Date"
-    validation_scores = pd.DataFrame(validation_rows).set_index("n_estimators")
+    validation_scores = pd.DataFrame(validation_rows).set_index("candidate")
 
     split_config = config["split"]
     metadata = {
@@ -403,7 +407,11 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
             "test": len(test),
         },
         "feature_columns": feature_columns,
-        "validation_metrics": {"arima": arima_validation_metrics},
+        "validation_metrics": {
+            "arima": arima_validation_metrics,
+            "xgboost_selected": best_xgb_validation_metrics,
+            "lstm_selected": best_lstm_validation_metrics,
+        },
         "model": {
             "xgboost": {
                 "selected_n_estimators": best_estimators,
@@ -423,6 +431,15 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
                 "state_updates": "append observed close after each one-step forecast",
                 "settings": arima_config,
             },
+            "lstm": {
+                "selected_epochs": best_epochs,
+                "selection_metric": lstm_selection_metric,
+                "sequence_length": lookback,
+                "target_transform": "predict log(next_close / current_close), then convert to USD close",
+                "scaling": "feature and target scalers fit on training sequences only during selection; refit on train+validation for final model",
+                "refit_during_test": False,
+                "parameters": {**lstm_common_parameters, "epochs": best_epochs},
+            },
         },
         "software_versions": {
             "python": platform.python_version(),
@@ -432,6 +449,8 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
             "xgboost": _package_version("xgboost"),
             "statsmodels": _package_version("statsmodels"),
             "pmdarima": _package_version("pmdarima"),
+            "scikit-learn": _package_version("scikit-learn"),
+            "torch": _package_version("torch"),
         },
     }
     return save_experiment_artifacts(

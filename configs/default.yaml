@@ -48,3 +48,14 @@ arima:
   d: 1
   seasonal: false
   stepwise: true
+
+lstm:
+  lookback: 30
+  hidden_size: 32
+  num_layers: 1
+  dropout: 0.0
+  learning_rate: 0.001
+  batch_size: 64
+  epochs_candidates: [10, 20, 30]
+  random_state: 42
+  selection_metric: rmse
