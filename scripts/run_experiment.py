@@ -1,4 +1,4 @@
-"""Tune XGBoost on validation data and compare it with persistence on test data."""
+"""Select ARIMA, XGBoost, and LSTM settings and compare on a held-out test year."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from btc_forecasting.artifacts import save_experiment_artifacts
 from btc_forecasting.evaluation import compare_predictions
 from btc_forecasting.metrics import evaluate_predictions, persistence_predictions
 from btc_forecasting.models.arima import RollingARIMAForecaster
+from btc_forecasting.models.lstm import LSTMForecaster
 from btc_forecasting.models.xgboost_model import XGBoostForecaster
 from btc_forecasting.splitting import split_from_config
 
@@ -113,8 +114,38 @@ def _rolling_arima_predictions(
     return pd.Series(values, index=rows.index, name="arima_prediction")
 
 
+def _build_lstm_sequences(
+    frame: pd.DataFrame,
+    feature_columns: list[str],
+    *,
+    target_column: str,
+    lookback: int,
+) -> tuple[Any, pd.Index, pd.Series]:
+    """Build causal lookback windows ending on each row's decision date."""
+    import numpy as np
+
+    if type(lookback) is not int or lookback < 1:
+        raise ValueError("lstm.lookback must be a positive integer")
+    if len(frame) < lookback:
+        raise ValueError("Feature history is shorter than the configured LSTM lookback")
+
+    feature_values = frame[feature_columns].to_numpy(dtype=np.float32)
+    close = pd.to_numeric(frame["Close"], errors="raise").to_numpy(dtype=float)
+    next_close = pd.to_numeric(frame[target_column], errors="raise").to_numpy(dtype=float)
+    if (close <= 0).any() or (next_close <= 0).any():
+        raise ValueError("LSTM log-return targets require positive close prices")
+
+    sequences = np.stack(
+        [feature_values[end - lookback + 1 : end + 1] for end in range(lookback - 1, len(frame))]
+    )
+    index = frame.index[lookback - 1 :]
+    log_return = np.log(next_close[lookback - 1 :] / close[lookback - 1 :])
+    target = pd.Series(log_return, index=index, name="Target_Log_Return")
+    return sequences, index, target
+
+
 def run_experiment(config_path: Path, data_override: Path | None, output_root: Path) -> Path:
-    """Run validation selection and a final held-out XGBoost comparison."""
+    """Select settings on validation and compare all models on held-out test data."""
     config = _load_config(config_path)
     try:
         horizon_days = int(config["target"]["horizon_days"])
@@ -124,9 +155,11 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
         candidate_estimators = xgb_config["n_estimators_candidates"]
         selection_metric = xgb_config["selection_metric"]
         arima_config = config["arima"]
+        lstm_config = config["lstm"]
+        candidate_epochs = lstm_config["epochs_candidates"]
     except (KeyError, TypeError) as exc:
         raise ValueError(
-            "Config must define data.features_file, target, XGBoost, and ARIMA settings"
+            "Config must define data.features_file, target, XGBoost, ARIMA, and LSTM settings"
         ) from exc
 
     if not isinstance(candidate_estimators, list) or not candidate_estimators:
@@ -137,6 +170,15 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
         raise ValueError("XGBoost estimator candidates must be unique")
     if selection_metric not in {"mae", "rmse"}:
         raise ValueError("xgboost.selection_metric must be 'mae' or 'rmse'")
+    if not isinstance(candidate_epochs, list) or not candidate_epochs:
+        raise ValueError("lstm.epochs_candidates must be a non-empty list")
+    if any(type(value) is not int or value < 1 for value in candidate_epochs):
+        raise ValueError("LSTM epoch candidates must be positive integers")
+    if len(set(candidate_epochs)) != len(candidate_epochs):
+        raise ValueError("LSTM epoch candidates must be unique")
+    lstm_selection_metric = lstm_config.get("selection_metric", selection_metric)
+    if lstm_selection_metric not in {"mae", "rmse"}:
+        raise ValueError("lstm.selection_metric must be 'mae' or 'rmse'")
 
     frame = _load_feature_table(data_path_value, horizon_days=horizon_days)
     if target_column not in frame.columns or "Close" not in frame.columns:
@@ -187,9 +229,10 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
         if key in xgb_config
     }
 
-    validation_rows: list[dict[str, float | int]] = []
+    validation_rows: list[dict[str, Any]] = []
     best_score: float | None = None
     best_estimators: int | None = None
+    best_xgb_validation_metrics: dict[str, float] | None = None
     for n_estimators in candidate_estimators:
         model = XGBoostForecaster(n_estimators=n_estimators, **common_params)
         model.fit(train[feature_columns], train[target_column])
@@ -199,19 +242,115 @@ def run_experiment(config_path: Path, data_override: Path | None, output_root: P
             predicted_next_close=prediction,
             previous_close=validation["Close"],
         )
-        validation_rows.append({"n_estimators": n_estimators, **scores})
+        validation_rows.append(
+            {
+                "candidate": f"xgboost_n_estimators_{n_estimators}",
+                "model": "xgboost",
+                "candidate_value": n_estimators,
+                **scores,
+            }
+        )
         score = scores[selection_metric]
         if best_score is None or score < best_score:
             best_score = score
             best_estimators = n_estimators
+            best_xgb_validation_metrics = scores
 
-    if best_estimators is None:
+    if best_estimators is None or best_xgb_validation_metrics is None:
         raise RuntimeError("Validation did not select an XGBoost candidate")
 
     development = pd.concat([train, validation]).sort_index()
     final_model = XGBoostForecaster(n_estimators=best_estimators, **common_params)
     final_model.fit(development[feature_columns], development[target_column])
     xgb_prediction = final_model.predict(test[feature_columns])
+
+    # Sequence windows end on their decision date. Validation and test windows
+    # may use earlier observed feature rows as context, while their labels stay
+    # in their respective target-date partitions.
+    lookback = int(lstm_config["lookback"])
+    lstm_sequences, sequence_index, lstm_targets = _build_lstm_sequences(
+        frame,
+        feature_columns,
+        target_column=target_column,
+        lookback=lookback,
+    )
+    sequence_positions = pd.Series(
+        range(len(sequence_index)), index=sequence_index, dtype="int64"
+    )
+    train_sequence_index = train.index.intersection(sequence_index, sort=False)
+    validation_sequence_index = validation.index.intersection(sequence_index, sort=False)
+    test_sequence_index = test.index.intersection(sequence_index, sort=False)
+    if not len(train_sequence_index) or not len(validation_sequence_index) or not len(test_sequence_index):
+        raise ValueError("LSTM sequence construction left an empty date partition")
+    train_sequence_positions = sequence_positions.loc[train_sequence_index].to_numpy()
+    validation_sequence_positions = sequence_positions.loc[validation_sequence_index].to_numpy()
+    test_sequence_positions = sequence_positions.loc[test_sequence_index].to_numpy()
+    train_log_returns = lstm_targets.loc[train_sequence_index]
+    validation_log_returns = lstm_targets.loc[validation_sequence_index]
+    test_log_returns = lstm_targets.loc[test_sequence_index]
+
+    lstm_common_parameters = {
+        key: lstm_config[key]
+        for key in (
+            "hidden_size",
+            "num_layers",
+            "dropout",
+            "learning_rate",
+            "batch_size",
+            "random_state",
+        )
+        if key in lstm_config
+    }
+    best_lstm_score: float | None = None
+    best_epochs: int | None = None
+    best_lstm_validation_metrics: dict[str, float] | None = None
+    for epochs in candidate_epochs:
+        model = LSTMForecaster(epochs=epochs, **lstm_common_parameters)
+        model.fit(lstm_sequences[train_sequence_positions], train_log_returns)
+        predicted_log_return = model.predict(
+            lstm_sequences[validation_sequence_positions],
+            index=validation_sequence_index,
+        )
+        predicted_close = validation.loc[validation_sequence_index, "Close"] * np.exp(
+            predicted_log_return
+        )
+        scores = evaluate_predictions(
+            actual_next_close=validation.loc[validation_sequence_index, target_column],
+            predicted_next_close=predicted_close,
+            previous_close=validation.loc[validation_sequence_index, "Close"],
+        )
+        validation_rows.append(
+            {
+                "candidate": f"lstm_epochs_{epochs}",
+                "model": "lstm",
+                "candidate_value": epochs,
+                **scores,
+            }
+        )
+        score = scores[lstm_selection_metric]
+        if best_lstm_score is None or score < best_lstm_score:
+            best_lstm_score = score
+            best_epochs = epochs
+            best_lstm_validation_metrics = scores
+
+    if best_epochs is None or best_lstm_validation_metrics is None:
+        raise RuntimeError("Validation did not select an LSTM candidate")
+
+    development_sequence_index = development.index.intersection(sequence_index, sort=False)
+    development_sequence_positions = sequence_positions.loc[development_sequence_index].to_numpy()
+    development_log_returns = lstm_targets.loc[development_sequence_index]
+    final_lstm = LSTMForecaster(epochs=best_epochs, **lstm_common_parameters)
+    final_lstm.fit(
+        lstm_sequences[development_sequence_positions],
+        development_log_returns,
+    )
+    lstm_test_prediction = final_lstm.predict(
+        lstm_sequences[test_sequence_positions],
+        index=test_sequence_index,
+    )
+    lstm_test_prediction = test.loc[test_sequence_index, "Close"] * np.exp(
+        lstm_test_prediction
+    )
 
     # The first test forecast is made after the 2024-12-31 close is known.
     # That close is included in ARIMA history, but its 2025-01-01 target is not.
