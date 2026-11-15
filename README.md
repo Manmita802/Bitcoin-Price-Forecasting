@@ -16,13 +16,13 @@ This repository contains a reproducible daily Bitcoin close forecasting backend.
 Use Python `>=3.11,<3.13` (Python 3.12 recommended). From the repository root:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -e ".[arima,xgboost,lstm]"
-.\.venv\Scripts\python scripts\run_experiment.py
+uv python install 3.12
+uv sync --python 3.12 --extra api --extra arima --extra xgboost --extra lstm
+uv run python scripts\prepare_data.py
+uv run python scripts\run_experiment.py
 ```
 
-The runner reads `data/bitcoin_features.csv` and `configs/default.yaml` by default. Use `--data`, `--config`, and `--output-root` to override those paths. Relative paths resolve from the repository root.
+`prepare_data.py` downloads the configured range from yfinance by default, stores a timestamped raw snapshot under `data/raw/`, and writes causal features to `data/processed/bitcoin_features.csv`. It preserves existing processed outputs unless you explicitly pass `--overwrite-features`. Use `--source-csv` to build features from an existing OHLCV CSV. The experiment runner then reads the configured feature path. Use `--data`, `--config`, and `--output-root` to override runner paths. Relative paths resolve from the repository root.
 
 The row dated *t* uses information available after candle *t* closes and predicts the close at *t+1*. Splits are based on target date: train through 2023-12-31, select settings in 2024, and reserve 2025 for the final evaluation. Test predictions are rolling one-step forecasts with fixed learned parameters; ARIMA updates its state after each observed close. The LSTM uses 30-day feature sequences and predicts log return, then converts the result to a close-price forecast. Every model is evaluated on the same test dates against the persistence baseline.
 
@@ -33,11 +33,10 @@ Run artifacts are saved under `artifacts/runs/` and excluded from Git. The data 
 Install the API dependencies and start FastAPI from the repository root:
 
 ```powershell
-.\.venv\Scripts\python -m pip install -e ".[api,arima,xgboost,lstm]"
-.\.venv\Scripts\python -m uvicorn btc_forecasting.api.main:app --reload --app-dir src
+uv run python -m uvicorn btc_forecasting.api.main:app --reload --app-dir src
 ```
 
-Open `http://127.0.0.1:8000/docs` for the interactive API description. Run the experiment to create deployable XGBoost and LSTM bundles. The API loads the latest run from `artifacts/runs/`; set `BTC_FORECASTING_MODEL_RUN` to select a particular run. The feature table path defaults to `data/bitcoin_features.csv` and can be changed with `BTC_FORECASTING_FEATURES`. For ML forecasts, the feature table and OHLCV history must end on the same date. XGBoost and LSTM currently support one-day-ahead forecasts only.
+Open `http://127.0.0.1:8000/docs` for the interactive API description. Run data preparation and the experiment to create the raw snapshot, feature table, and deployable XGBoost/LSTM bundles. The API automatically uses the newest timestamped raw snapshot under `data/raw/` and latest run under `artifacts/runs/`. Set `BTC_FORECASTING_MODEL_RUN` to select a particular run and `BTC_FORECASTING_DATA` to override the raw snapshot. The feature table defaults to `data/processed/bitcoin_features.csv`; set `BTC_FORECASTING_FEATURES` to override it. XGBoost and LSTM currently support one-day-ahead forecasts only.
 
 ## Project limitations and next work
 

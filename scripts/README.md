@@ -3,11 +3,13 @@
 Use Python `>=3.11,<3.13`, preferably Python 3.12. From the repository root:
 
 ```powershell
-python -m pip install -e ".[arima,xgboost,lstm]"
-python scripts/run_experiment.py
+uv python install 3.12
+uv sync --python 3.12 --extra arima --extra xgboost --extra lstm
+uv run python scripts/prepare_data.py
+uv run python scripts/run_experiment.py
 ```
 
-The default input is `data/bitcoin_features.csv`; settings are read from `configs/default.yaml`. Use `--data`, `--config`, or `--output-root` to override them. Relative paths are resolved from the repository root.
+`prepare_data.py` downloads the configured yfinance history, saves a timestamped immutable OHLCV snapshot under `data/raw/`, and writes the canonical feature table at `data/processed/bitcoin_features.csv`. Existing processed output is protected by default; use `--overwrite-features` to replace it deliberately. Use `--source-csv` to prepare from a local OHLCV file instead. The experiment reads the configured feature path and model settings from `configs/default.yaml`. Use `--data`, `--config`, or `--output-root` to override runner paths. Relative paths are resolved from the repository root.
 
 The runner partitions rows by **target date**: train through 2023-12-31, use 2024 for setting selection, and reserve 2025 for final evaluation. All forecasts predict the next close after the current daily candle closes and are scored on the same target dates against persistence.
 

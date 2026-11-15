@@ -3,11 +3,11 @@ data:
   symbol: BTC-USD
   source: yfinance
   start_date: "2018-01-01"
-  end_date_exclusive: "2026-01-01"
+  end_date_exclusive: "2026-11-15"
   timezone: UTC
   raw_dir: data/raw
   processed_dir: data/processed
-  features_file: data/bitcoin_features.csv
+  features_file: data/processed/bitcoin_features.csv
 
 target:
   column: Target_Next_Close

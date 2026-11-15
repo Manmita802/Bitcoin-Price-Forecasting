@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import numpy as np
 import pandas as pd
@@ -92,6 +93,18 @@ def fetch_ohlcv(
 ) -> pd.DataFrame:
     """Fetch daily OHLCV from yfinance; ``end_exclusive`` is not included."""
     import yfinance as yf
+
+    # yfinance stores cookies and timezone mappings in a user cache directory.
+    # Point it at a project-local ignored directory so runs work in restricted
+    # environments and remain independent of machine-specific profile paths.
+    cache_dir = Path(
+        os.environ.get(
+            "BTC_FORECASTING_CACHE_DIR",
+            Path(__file__).resolve().parents[2] / "data" / "raw" / ".yfinance-cache",
+        )
+    ).expanduser()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(cache_dir))
 
     downloaded = yf.download(
         symbol,

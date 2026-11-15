@@ -25,7 +25,8 @@ from .schemas import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "bitcoin_data.csv"
-DEFAULT_FEATURES_PATH = PROJECT_ROOT / "data" / "bitcoin_features.csv"
+DEFAULT_FEATURES_PATH = PROJECT_ROOT / "data" / "processed" / "bitcoin_features.csv"
+DEFAULT_RAW_DIRECTORY = PROJECT_ROOT / "data" / "raw"
 DEFAULT_RUNS_PATH = PROJECT_ROOT / "artifacts" / "runs"
 ARIMA_ORDER_PATH = PROJECT_ROOT / "arima" / "arima_metrics.json"
 DATA_ENV_VAR = "BTC_FORECASTING_DATA"
@@ -54,7 +55,8 @@ def data_path() -> Path:
     """
     configured = os.environ.get(DATA_ENV_VAR)
     if not configured:
-        return DEFAULT_DATA_PATH
+        snapshots = sorted(DEFAULT_RAW_DIRECTORY.glob("*.csv")) if DEFAULT_RAW_DIRECTORY.is_dir() else []
+        return snapshots[-1] if snapshots else DEFAULT_DATA_PATH
 
     path = Path(configured).expanduser()
     return path if path.is_absolute() else PROJECT_ROOT / path

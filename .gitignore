@@ -13,3 +13,5 @@ venv/
 
 # Generated pipeline outputs; retain source data and intentional figures unless explicitly moved here
 artifacts/
+data/raw/
+data/processed/
