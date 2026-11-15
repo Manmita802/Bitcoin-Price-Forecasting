@@ -49,7 +49,7 @@ def split_by_date(
         raise ValueError("Dates cannot contain missing values")
     if not dates.is_monotonic_increasing:
         raise ValueError("Rows must be chronological before splitting")
-    if dates.has_duplicates:
+    if dates.duplicated().any():
         raise ValueError("Rows contain duplicate dates")
 
     train_mask = dates <= boundaries["train_end"]

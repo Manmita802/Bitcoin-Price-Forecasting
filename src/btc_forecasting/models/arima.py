@@ -44,6 +44,7 @@ class RollingARIMAForecaster:
         self._last_date: pd.Timestamp | None = None
         self._awaiting_observation: pd.Timestamp | None = None
         self._index_name = "Date"
+        self._series_name: str | None = None
 
     def fit(self, close_history: pd.Series) -> RollingARIMAForecaster:
         """Fit fixed ARIMA parameters using the supplied development history."""
@@ -56,6 +57,7 @@ class RollingARIMAForecaster:
         self._last_date = values.index[-1]
         self._awaiting_observation = None
         self._index_name = values.index.name or "Date"
+        self._series_name = values.name
         return self
 
     def forecast_next(self) -> float:
@@ -95,6 +97,7 @@ class RollingARIMAForecaster:
         observation = pd.Series(
             [observed_close],
             index=pd.DatetimeIndex([observed_date], name=self._index_name),
+            name=self._series_name,
         )
         self._result = self._result.append(observation, refit=False)
         self._last_date = observed_date
